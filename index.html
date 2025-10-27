@@ -2,225 +2,493 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8" />
-<title>Публикация HTML — зашифрованная (без сервера)</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Быстрая публикация — компактная ссылка (без сервера)</title>
 <style>
-  body{font-family:Inter,system-ui,Segoe UI,Roboto,Arial;max-width:900px;margin:24px auto;padding:12px}
+  body{font-family:system-ui,Segoe UI,Roboto,Arial;max-width:900px;margin:20px auto;padding:16px}
   h1{margin-top:0}
-  textarea{width:100%;height:240px;font-family:monospace;font-size:13px;padding:10px;border-radius:8px;border:1px solid #ddd;box-sizing:border-box}
-  input, button{padding:10px;border-radius:8px;border:1px solid #bbb}
-  .row{display:flex;gap:8px;margin-top:8px}
+  textarea{width:100%;height:280px;font-family:monospace;font-size:13px;padding:10px;border-radius:8px;border:1px solid #ddd;box-sizing:border-box}
+  .row{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+  input, button{padding:10px;border-radius:8px;border:1px solid #bbb;background:#fff}
+  button{cursor:pointer}
   .result{margin-top:12px;padding:12px;background:#fafafa;border-radius:8px;border:1px solid #eee;word-break:break-all}
-  iframe{width:100%;height:320px;border:1px solid #ccc;border-radius:8px;margin-top:10px}
+  iframe{width:100%;height:360px;border:1px solid #ccc;border-radius:8px;margin-top:10px}
   small{color:#666}
 </style>
 </head>
 <body>
-<h1>Опубликовать HTML зашифрованно (без сервера)</h1>
-<p>Вставь HTML → установи пароль (или сгенерируй) → получи ссылку. Код в ссылке зашифрован и не читаем без пароля.</p>
+<h1>Публикация — компактная ссылка (без сервера)</h1>
+<p>Вставь HTML → жми «Создать ссылку» → получаешь компактную ссылку. Без шифров, без паролей — то, что вставил, тот и увидит.</p>
 
 <div id="app">
-  <label><strong>HTML код:</strong></label>
+  <label><strong>HTML-код:</strong></label>
   <textarea id="code" placeholder="&lt;h1&gt;Привет&lt;/h1&gt;"></textarea>
 
   <div class="row">
-    <input id="password" type="text" placeholder="пароль (оставь пустым чтобы сгенерировать)" />
-    <button id="genPwd">Сгенерировать пароль</button>
-    <button id="publish">Зашифровать и создать ссылку</button>
+    <button id="publish">Создать ссылку</button>
+    <button id="previewBtn">Показать предпросмотр</button>
+    <button id="clearBtn">Очистить</button>
   </div>
 
   <div class="result" id="result" style="display:none"></div>
 
   <div id="previewBox" style="display:none">
-    <h3>Предпросмотр (расшифрование локально)</h3>
+    <h3>Предпросмотр</h3>
     <iframe id="preview"></iframe>
   </div>
+
+  <p style="margin-top:12px"><small>Замечание: ссылка содержит весь код (сжатый) в хеше `#`. Отправляй ссылку получателю — он откроет страницу без сервера. Для очень больших страниц ссылка может получиться длинной.</small></p>
 </div>
 
-<hr />
-<div id="viewer" style="display:none">
-  <h2>Расшифровать страницу</h2>
-  <p>Введите пароль, чтобы увидеть содержимое:</p>
-  <input id="decPassword" type="text" placeholder="введите пароль" />
-  <button id="decryptBtn">Расшифровать и открыть</button>
-  <div id="decResult" class="result" style="display:none"></div>
-  <div id="decPreviewBox" style="display:none">
-    <h3>Расшифрованный результат</h3>
-    <iframe id="decPreview"></iframe>
-  </div>
-</div>
+<div id="viewer" style="display:none"></div>
 
 <script>
-/* ---- Утилиты для base64 <-> ArrayBuffer ---- */
-function abToBase64(buf){
-  const bin = String.fromCharCode(...new Uint8Array(buf));
-  return btoa(bin);
-}
-function base64ToAb(b64){
-  const bin = atob(b64);
-  const arr = new Uint8Array(bin.length);
-  for (let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
-  return arr.buffer;
-}
-function strToAb(str){ return new TextEncoder().encode(str); }
-function abToStr(ab){ return new TextDecoder().decode(ab); }
-
-/* ---- Крипто: PBKDF2 -> AES-GCM ---- */
-async function deriveKey(password, salt, iterations=200000) {
-  const baseKey = await crypto.subtle.importKey(
-    'raw', strToAb(password), {name:'PBKDF2'}, false, ['deriveKey']
-  );
-  return crypto.subtle.deriveKey(
-    {name:'PBKDF2', salt: salt, iterations: iterations, hash: 'SHA-256'},
-    baseKey,
-    {name:'AES-GCM', length: 256},
-    false,
-    ['encrypt','decrypt']
-  );
-}
-
-async function encryptHtml(html, password){
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const iv = crypto.getRandomValues(new Uint8Array(12)); // 96-bit recommended
-  const key = await deriveKey(password, salt);
-  const ct = await crypto.subtle.encrypt({name:'AES-GCM', iv: iv}, key, strToAb(html));
-  // вернём base64-пакет {salt, iv, ct}
-  return {
-    salt: abToBase64(salt.buffer),
-    iv: abToBase64(iv.buffer),
-    ct: abToBase64(ct)
-  };
-}
-
-async function decryptPackage(pkg, password){
-  const salt = base64ToAb(pkg.salt);
-  const iv = base64ToAb(pkg.iv);
-  const ct = base64ToAb(pkg.ct);
-  const key = await deriveKey(password, new Uint8Array(salt));
-  try {
-    const plain = await crypto.subtle.decrypt({name:'AES-GCM', iv: new Uint8Array(iv)}, key, ct);
-    return abToStr(plain);
-  } catch (e) {
-    throw new Error('Не удалось расшифровать: неверный пароль или повреждённые данные.');
+/* ---- LZ-String: compressToEncodedURIComponent & decompressFromEncodedURIComponent ----
+   Минимально необходимая реализация (взята из общеизвестной LZ-String библиотеки). */
+const LZ = (function(){
+  // helper: compress to encodedURIComponent
+  function compressToEncodedURIComponent(input) {
+    if (input == null) return "";
+    return _compress(input, 6, function(a){ return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-$".charAt(a); });
   }
-}
-
-/* ---- Формирование ссылки: помещаем пакет в хеш (#) чтобы не отправлять серверу ----
-   Структура в хеше: #enc=<base64(JSON(package))>  */
-function makeShareHash(pkg){
-  const json = JSON.stringify(pkg);
-  return 'enc=' + encodeURIComponent(abToBase64(strToAb(json)));
-}
-function parseHash(hash){
-  if (!hash) return null;
-  const q = new URLSearchParams(hash.replace(/^#/, ''));
-  if (!q.has('enc')) return null;
-  try {
-    const b64 = decodeURIComponent(q.get('enc'));
-    const jsonStr = abToStr(base64ToAb(b64));
-    return JSON.parse(jsonStr);
-  } catch(e){ return null; }
-}
-
-/* ---- UI ---- */
-const codeEl = document.getElementById('code');
-const pwdEl = document.getElementById('password');
-const genBtn = document.getElementById('genPwd');
-const pubBtn = document.getElementById('publish');
-const res = document.getElementById('result');
-const previewBox = document.getElementById('previewBox');
-const preview = document.getElementById('preview');
-
-genBtn.onclick = () => {
-  // простой удобный пароль: 12 символов base62
-  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let p='';
-  for (let i=0;i<12;i++) p+=chars[Math.floor(Math.random()*chars.length)];
-  pwdEl.value = p;
-};
-
-pubBtn.onclick = async () => {
-  const html = codeEl.value;
-  if (!html.trim()) return alert('Введите HTML код.');
-  let password = pwdEl.value;
-  if (!password) {
-    // если пустой — сгенерируем и покажем
-    genBtn.click();
-    password = pwdEl.value;
-    alert('Сгенерирован пароль. Передайте его отдельно получателю. (Пароль не включён в саму ссылку.)');
+  function decompressFromEncodedURIComponent(input) {
+    if (input == null) return "";
+    if (input == "") return null;
+    input = input.replace(/ /g, "+");
+    return _decompress(input.length, 32, function(index) { return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-$".indexOf(input.charAt(index)); });
   }
+  /* internals (compressed implementation) */
+  function _compress(uncompressed, bitsPerChar, getCharFromInt) {
+    if (uncompressed == null) return "";
+    let i, value,
+      context_dictionary = {},
+      context_dictionaryToCreate = {},
+      context_c = "",
+      context_wc = "",
+      context_w = "",
+      context_enlargeIn = 2, // Compensate for the first entry which should not count
+      context_dictSize = 3,
+      context_numBits = 2,
+      context_data = [],
+      context_data_val = 0,
+      context_data_position = 0;
 
-  pubBtn.disabled = true;
-  pubBtn.textContent = 'Шифрую...';
-  try {
-    const pkg = await encryptHtml(html, password);
-    // пакет может быть большим — но обычно поместится в hash
-    const hash = makeShareHash(pkg);
-    const baseUrl = location.origin + location.pathname;
-    const shareLink = baseUrl + '#' + hash;
-    res.style.display = 'block';
-    res.innerHTML = `<strong>Ссылка (скопируй и отправь):</strong><br>
-      <input id="linkField" style="width:100%;padding:8px;margin-top:6px" value="${shareLink}" readonly />
-      <div style="margin-top:8px">
-        <button id="copyBtn">Копировать ссылку</button>
-        <button id="openBtn">Открыть в новой вкладке</button>
-        <button id="showPreview">Предпросмотр здесь</button>
-      </div>
-      <p><small>Пароль не входит в ссылку. Обязательно передайте пароль получателю другим каналом.</small></p>`;
-
-    document.getElementById('copyBtn').onclick = () => {
-      const lf = document.getElementById('linkField');
-      lf.select(); lf.setSelectionRange(0, 99999);
-      document.execCommand('copy');
-      alert('Ссылка скопирована в буфер обмена. Не забудь передать пароль отдельно.');
-    };
-    document.getElementById('openBtn').onclick = () => window.open(shareLink, '_blank');
-
-    document.getElementById('showPreview').onclick = async () => {
-      previewBox.style.display = 'block';
-      try {
-        const dec = await decryptPackage(pkg, password);
-        preview.srcdoc = dec;
-      } catch(e){
-        alert(e.message);
+    for (i = 0; i < uncompressed.length; i += 1) {
+      context_c = uncompressed.charAt(i);
+      if (!Object.prototype.hasOwnProperty.call(context_dictionary,context_c)) {
+        context_dictionary[context_c] = context_dictSize++;
+        context_dictionaryToCreate[context_c] = true;
       }
-    };
 
-  } catch(err){
-    alert('Ошибка: ' + err.message);
-  } finally {
-    pubBtn.disabled = false;
-    pubBtn.textContent = 'Зашифровать и создать ссылку';
+      context_wc = context_w + context_c;
+      if (Object.prototype.hasOwnProperty.call(context_dictionary,context_wc)) {
+        context_w = context_wc;
+      } else {
+        if (Object.prototype.hasOwnProperty.call(context_dictionaryToCreate,context_w)) {
+          if (context_w.charCodeAt(0) < 256) {
+            for (value = 0; value < context_numBits; value++) {
+              context_data_val = (context_data_val << 1);
+              if (context_data_position == bitsPerChar-1) {
+                context_data_position = 0;
+                context_data.push(getCharFromInt(context_data_val));
+                context_data_val = 0;
+              } else context_data_position++;
+            }
+            value = context_w.charCodeAt(0);
+            for (let j=0;j<8;j++) {
+              context_data_val = (context_data_val << 1) | (value & 1);
+              if (context_data_position == bitsPerChar-1) {
+                context_data_position = 0;
+                context_data.push(getCharFromInt(context_data_val));
+                context_data_val = 0;
+              } else context_data_position++;
+              value = value >> 1;
+            }
+          } else {
+            value = 1;
+            for (let j=0;j<context_numBits;j++) {
+              context_data_val = (context_data_val << 1) | value;
+              if (context_data_position == bitsPerChar-1) {
+                context_data_position = 0;
+                context_data.push(getCharFromInt(context_data_val));
+                context_data_val = 0;
+              } else context_data_position++;
+            }
+            value = context_w.charCodeAt(0);
+            for (let j=0;j<16;j++) {
+              context_data_val = (context_data_val << 1) | (value & 1);
+              if (context_data_position == bitsPerChar-1) {
+                context_data_position = 0;
+                context_data.push(getCharFromInt(context_data_val));
+                context_data_val = 0;
+              } else context_data_position++;
+              value = value >> 1;
+            }
+          }
+          context_enlargeIn--;
+          if (context_enlargeIn == 0) {
+            context_enlargeIn = Math.pow(2, context_numBits);
+            context_numBits++;
+          }
+          delete context_dictionaryToCreate[context_w];
+        } else {
+          value = context_dictionary[context_w];
+          for (let j=0;j<context_numBits;j++) {
+            context_data_val = (context_data_val << 1) | (value & 1);
+            if (context_data_position == bitsPerChar-1) {
+              context_data_position = 0;
+              context_data.push(getCharFromInt(context_data_val));
+              context_data_val = 0;
+            } else context_data_position++;
+            value = value >> 1;
+          }
+        }
+        context_enlargeIn--;
+        if (context_enlargeIn == 0) {
+          context_enlargeIn = Math.pow(2, context_numBits);
+          context_numBits++;
+        }
+        // Add wc to the dictionary.
+        context_dictionary[context_wc] = context_dictSize++;
+        context_w = String(context_c);
+      }
+    }
+
+    if (context_w !== "") {
+      if (Object.prototype.hasOwnProperty.call(context_dictionaryToCreate,context_w)) {
+        if (context_w.charCodeAt(0) < 256) {
+          for (let j = 0; j < context_numBits; j++) {
+            context_data_val = (context_data_val << 1);
+            if (context_data_position == bitsPerChar-1) {
+              context_data_position = 0;
+              context_data.push(getCharFromInt(context_data_val));
+              context_data_val = 0;
+            } else context_data_position++;
+          }
+          value = context_w.charCodeAt(0);
+          for (let j = 0; j < 8; j++) {
+            context_data_val = (context_data_val << 1) | (value & 1);
+            if (context_data_position == bitsPerChar-1) {
+              context_data_position = 0;
+              context_data.push(getCharFromInt(context_data_val));
+              context_data_val = 0;
+            } else context_data_position++;
+            value = value >> 1;
+          }
+        } else {
+          value = 1;
+          for (let j = 0; j < context_numBits; j++) {
+            context_data_val = (context_data_val << 1) | value;
+            if (context_data_position == bitsPerChar-1) {
+              context_data_position = 0;
+              context_data.push(getCharFromInt(context_data_val));
+              context_data_val = 0;
+            } else context_data_position++;
+          }
+          value = context_w.charCodeAt(0);
+          for (let j = 0; j < 16; j++) {
+            context_data_val = (context_data_val << 1) | (value & 1);
+            if (context_data_position == bitsPerChar-1) {
+              context_data_position = 0;
+              context_data.push(getCharFromInt(context_data_val));
+              context_data_val = 0;
+            } else context_data_position++;
+            value = value >> 1;
+          }
+        }
+        context_enlargeIn--;
+        if (context_enlargeIn == 0) {
+          context_enlargeIn = Math.pow(2, context_numBits);
+          context_numBits++;
+        }
+        delete context_dictionaryToCreate[context_w];
+      } else {
+        value = context_dictionary[context_w];
+        for (let j = 0; j < context_numBits; j++) {
+          context_data_val = (context_data_val << 1) | (value & 1);
+          if (context_data_position == bitsPerChar-1) {
+            context_data_position = 0;
+            context_data.push(getCharFromInt(context_data_val));
+            context_data_val = 0;
+          } else context_data_position++;
+          value = value >> 1;
+        }
+      }
+      context_enlargeIn--;
+      if (context_enlargeIn == 0) {
+        context_enlargeIn = Math.pow(2, context_numBits);
+        context_numBits++;
+      }
+    }
+
+    // Mark the end of the stream
+    value = 2;
+    for (let j = 0; j < context_numBits; j++) {
+      context_data_val = (context_data_val << 1) | (value & 1);
+      if (context_data_position == bitsPerChar-1) {
+        context_data_position = 0;
+        context_data.push(getCharFromInt(context_data_val));
+        context_data_val = 0;
+      } else context_data_position++;
+      value = value >> 1;
+    }
+
+    // Flush the last char
+    while (true) {
+      context_data_val = (context_data_val << 1);
+      if (context_data_position == bitsPerChar-1) {
+        context_data.push(getCharFromInt(context_data_val));
+        break;
+      }
+      else context_data_position++;
+    }
+    return context_data.join('');
+  }
+
+  function _decompress(length, resetValue, getNextValue) {
+    let dictionary = [],
+        enlargeIn = 4,
+        dictSize = 4,
+        numBits = 3,
+        entry = "",
+        result = [],
+        i, w, bits, resb, maxpower, power,
+        c,
+        data = {val:getNextValue(0), position:resetValue, index:1};
+
+    for (i = 0; i < 3; i += 1) {
+      dictionary[i] = i;
+    }
+
+    bits = 0;
+    maxpower = Math.pow(2,2);
+    power = 1;
+    while (power != maxpower) {
+      resb = data.val & data.position;
+      data.position >>= 1;
+      if (data.position == 0) {
+        data.position = resetValue;
+        data.val = getNextValue(data.index++);
+      }
+      bits |= (resb>0?1:0) * power;
+      power <<= 1;
+    }
+
+    switch (next = bits) {
+      case 0:
+        bits = 0;
+        maxpower = Math.pow(2,8);
+        power = 1;
+        while (power != maxpower) {
+          resb = data.val & data.position;
+          data.position >>= 1;
+          if (data.position == 0) {
+            data.position = resetValue;
+            data.val = getNextValue(data.index++);
+          }
+          bits |= (resb>0?1:0) * power;
+          power <<= 1;
+        }
+        c = String.fromCharCode(bits);
+        break;
+      case 1:
+        bits = 0;
+        maxpower = Math.pow(2,16);
+        power = 1;
+        while (power != maxpower) {
+          resb = data.val & data.position;
+          data.position >>= 1;
+          if (data.position == 0) {
+            data.position = resetValue;
+            data.val = getNextValue(data.index++);
+          }
+          bits |= (resb>0?1:0) * power;
+          power <<= 1;
+        }
+        c = String.fromCharCode(bits);
+        break;
+      case 2:
+        return "";
+    }
+    dictionary[3] = c;
+    w = c;
+    result.push(c);
+    while (true) {
+      if (data.index > length) {
+        return "";
+      }
+
+      bits = 0;
+      maxpower = Math.pow(2,numBits);
+      power = 1;
+      while (power != maxpower) {
+        resb = data.val & data.position;
+        data.position >>= 1;
+        if (data.position == 0) {
+          data.position = resetValue;
+          data.val = getNextValue(data.index++);
+        }
+        bits |= (resb>0?1:0) * power;
+        power <<= 1;
+      }
+
+      switch (c = bits) {
+        case 0:
+          bits = 0;
+          maxpower = Math.pow(2,8);
+          power = 1;
+          while (power != maxpower) {
+            resb = data.val & data.position;
+            data.position >>= 1;
+            if (data.position == 0) {
+              data.position = resetValue;
+              data.val = getNextValue(data.index++);
+            }
+            bits |= (resb>0?1:0) * power;
+            power <<= 1;
+          }
+
+          dictionary[dictSize++] = String.fromCharCode(bits);
+          c = dictSize-1;
+          enlargeIn--;
+          break;
+        case 1:
+          bits = 0;
+          maxpower = Math.pow(2,16);
+          power = 1;
+          while (power != maxpower) {
+            resb = data.val & data.position;
+            data.position >>= 1;
+            if (data.position == 0) {
+              data.position = resetValue;
+              data.val = getNextValue(data.index++);
+            }
+            bits |= (resb>0?1:0) * power;
+            power <<= 1;
+          }
+          dictionary[dictSize++] = String.fromCharCode(bits);
+          c = dictSize-1;
+          enlargeIn--;
+          break;
+        case 2:
+          return result.join('');
+      }
+
+      if (enlargeIn == 0) {
+        enlargeIn = Math.pow(2, numBits);
+        numBits++;
+      }
+
+      if (dictionary[c]) {
+        entry = dictionary[c];
+      } else {
+        if (c === dictSize) {
+          entry = w + w.charAt(0);
+        } else {
+          return null;
+        }
+      }
+      result.push(entry);
+
+      // Add w+entry[0] to the dictionary.
+      dictionary[dictSize++] = w + entry.charAt(0);
+      enlargeIn--;
+
+      w = entry;
+
+      if (enlargeIn == 0) {
+        enlargeIn = Math.pow(2, numBits);
+        numBits++;
+      }
+    }
+  }
+
+  return { compressToEncodedURIComponent, decompressFromEncodedURIComponent };
+})();
+
+/* ---- UI logic ---- */
+const codeEl = document.getElementById('code');
+const publishBtn = document.getElementById('publish');
+const resultBox = document.getElementById('result');
+const previewBox = document.getElementById('previewBox');
+const previewFrame = document.getElementById('preview');
+const previewBtn = document.getElementById('previewBtn');
+const clearBtn = document.getElementById('clearBtn');
+
+publishBtn.onclick = () => {
+  const html = codeEl.value || '';
+  if (!html.trim()) return alert('Введите HTML код!');
+  // сжимаем и кодируем так, чтобы безопасно помещать в URL (encodeURIComponent-подобный алфавит)
+  const compressed = LZ.compressToEncodedURIComponent(html);
+  const baseUrl = location.origin + location.pathname;
+  const share = baseUrl + '#e=' + compressed;
+
+  resultBox.style.display = 'block';
+  resultBox.innerHTML = `
+    <strong>Готово — скопируй ссылку и отправь:</strong><br>
+    <input id="linkField" style="width:100%;padding:8px;margin-top:6px" value="${share}" readonly />
+    <div style="margin-top:8px">
+      <button id="copyBtn">Копировать ссылку</button>
+      <button id="openBtn">Открыть в новой вкладке</button>
+      <button id="shortWarn" style="display:none">Link too long</button>
+    </div>
+    <p style="margin-top:8px"><small>Длина ссылки: ${share.length} символов</small></p>
+  `;
+
+  document.getElementById('copyBtn').onclick = () => {
+    const lf = document.getElementById('linkField');
+    lf.select(); lf.setSelectionRange(0, 999999);
+    document.execCommand('copy');
+    alert('Ссылка скопирована.');
+  };
+  document.getElementById('openBtn').onclick = () => window.open(share, '_blank');
+
+  // показать превью автоматически
+  previewBox.style.display = 'block';
+  previewFrame.srcdoc = html;
+
+  // предупреждение если ссылка очень длинная (>2000 символов — может не работать в некоторых мессенджерах)
+  if (share.length > 2000) {
+    const warn = document.getElementById('shortWarn');
+    warn.style.display='inline-block';
+    warn.textContent = 'Внимание: ссылка длинная (может плохо отправляться в некоторых мессенджерах)';
   }
 };
 
-/* ---- Просмотр / Расшифровка при открытии ссылки с хешем ---- */
-const hashPkg = parseHash(location.hash);
-if (hashPkg) {
-  // переключаем UI в режим просмотра
-  document.getElementById('app').style.display = 'none';
-  const viewer = document.getElementById('viewer');
-  viewer.style.display = 'block';
-  document.getElementById('decryptBtn').onclick = async () => {
-    const pwd = document.getElementById('decPassword').value;
-    if (!pwd) return alert('Введи пароль для расшифровки.');
-    document.getElementById('decryptBtn').disabled = true;
-    document.getElementById('decryptBtn').textContent = 'Расшифровываю...';
-    try {
-      const plain = await decryptPackage(hashPkg, pwd);
-      document.getElementById('decResult').style.display='block';
-      document.getElementById('decResult').innerHTML = '<strong>Успешно расшифровано.</strong>';
-      document.getElementById('decPreviewBox').style.display='block';
-      document.getElementById('decPreview').srcdoc = plain;
-    } catch(e){
-      alert('Ошибка: ' + e.message);
-    } finally {
-      document.getElementById('decryptBtn').disabled = false;
-      document.getElementById('decryptBtn').textContent = 'Расшифровать и открыть';
-    }
-  };
-  // Подсказка: если пароль был сгенерирован владельцем, попросите пароль отдельно
-}
+previewBtn.onclick = () => {
+  const html = codeEl.value || '';
+  if (!html.trim()) return alert('Введите HTML код для предпросмотра.');
+  previewBox.style.display = 'block';
+  previewFrame.srcdoc = html;
+};
+
+clearBtn.onclick = () => {
+  if (!confirm('Очистить поле?')) return;
+  codeEl.value = '';
+  resultBox.style.display = 'none';
+  previewBox.style.display = 'none';
+};
+
+/* ---- При открытии ссылки: распакуем и покажем только страницу (без UI) ---- */
+(function handleOpen() {
+  const hash = location.hash || '';
+  if (!hash) return; // обычный режим — показываем UI
+  const params = new URLSearchParams(hash.replace(/^#/, ''));
+  if (!params.has('e')) return;
+  const enc = params.get('e');
+  try {
+    const html = LZ.decompressFromEncodedURIComponent(enc);
+    if (html == null) throw new Error('Не удалось распаковать содержимое.');
+    // Заменим страницу на чистый контент (чтобы не показывать UI)
+    document.documentElement.innerHTML = html;
+    // Если нужно, можно принудительно установить base href чтобы относительные пути работали:
+    // const base = document.createElement('base'); base.href = location.href.split('#')[0]; document.head.appendChild(base);
+  } catch (e) {
+    // если что-то не так — оставим UI и покажем ошибку
+    console.error(e);
+    alert('Ошибка: не удалось распаковать страницу из ссылки.');
+  }
+})();
 </script>
 </body>
 </html>
