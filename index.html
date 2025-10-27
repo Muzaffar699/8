@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Публикация HTML — зашифрованная (без сервера)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  body{font-family:Inter,system-ui,Segoe UI,Roboto,Arial;max-width:900px;margin:24px auto;padding:12px}
+  h1{margin-top:0}
+  textarea{width:100%;height:240px;font-family:monospace;font-size:13px;padding:10px;border-radius:8px;border:1px solid #ddd;box-sizing:border-box}
+  input, button{padding:10px;border-radius:8px;border:1px solid #bbb}
+  .row{display:flex;gap:8px;margin-top:8px}
+  .result{margin-top:12px;padding:12px;background:#fafafa;border-radius:8px;border:1px solid #eee;word-break:break-all}
+  iframe{width:100%;height:320px;border:1px solid #ccc;border-radius:8px;margin-top:10px}
+  small{color:#666}
+</style>
+</head>
+<body>
+<h1>Опубликовать HTML зашифрованно (без сервера)</h1>
+<p>Вставь HTML → установи пароль (или сгенерируй) → получи ссылку. Код в ссылке зашифрован и не читаем без пароля.</p>
+
+<div id="app">
+  <label><strong>HTML код:</strong></label>
+  <textarea id="code" placeholder="&lt;h1&gt;Привет&lt;/h1&gt;"></textarea>
+
+  <div class="row">
+    <input id="password" type="text" placeholder="пароль (оставь пустым чтобы сгенерировать)" />
+    <button id="genPwd">Сгенерировать пароль</button>
+    <button id="publish">Зашифровать и создать ссылку</button>
+  </div>
+
+  <div class="result" id="result" style="display:none"></div>
+
+  <div id="previewBox" style="display:none">
+    <h3>Предпросмотр (расшифрование локально)</h3>
+    <iframe id="preview"></iframe>
+  </div>
+</div>
+
+<hr />
+<div id="viewer" style="display:none">
+  <h2>Расшифровать страницу</h2>
+  <p>Введите пароль, чтобы увидеть содержимое:</p>
+  <input id="decPassword" type="text" placeholder="введите пароль" />
+  <button id="decryptBtn">Расшифровать и открыть</button>
+  <div id="decResult" class="result" style="display:none"></div>
+  <div id="decPreviewBox" style="display:none">
+    <h3>Расшифрованный результат</h3>
+    <iframe id="decPreview"></iframe>
+  </div>
+</div>
+
+<script>
+/* ---- Утилиты для base64 <-> ArrayBuffer ---- */
+function abToBase64(buf){
+  const bin = String.fromCharCode(...new Uint8Array(buf));
+  return btoa(bin);
+}
+function base64ToAb(b64){
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
+  return arr.buffer;
+}
+function strToAb(str){ return new TextEncoder().encode(str); }
+function abToStr(ab){ return new TextDecoder().decode(ab); }
+
+/* ---- Крипто: PBKDF2 -> AES-GCM ---- */
+async function deriveKey(password, salt, iterations=200000) {
+  const baseKey = await crypto.subtle.importKey(
+    'raw', strToAb(password), {name:'PBKDF2'}, false, ['deriveKey']
+  );
+  return crypto.subtle.deriveKey(
+    {name:'PBKDF2', salt: salt, iterations: iterations, hash: 'SHA-256'},
+    baseKey,
+    {name:'AES-GCM', length: 256},
+    false,
+    ['encrypt','decrypt']
+  );
+}
+
+async function encryptHtml(html, password){
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12)); // 96-bit recommended
+  const key = await deriveKey(password, salt);
+  const ct = await crypto.subtle.encrypt({name:'AES-GCM', iv: iv}, key, strToAb(html));
+  // вернём base64-пакет {salt, iv, ct}
+  return {
+    salt: abToBase64(salt.buffer),
+    iv: abToBase64(iv.buffer),
+    ct: abToBase64(ct)
+  };
+}
+
+async function decryptPackage(pkg, password){
+  const salt = base64ToAb(pkg.salt);
+  const iv = base64ToAb(pkg.iv);
+  const ct = base64ToAb(pkg.ct);
+  const key = await deriveKey(password, new Uint8Array(salt));
+  try {
+    const plain = await crypto.subtle.decrypt({name:'AES-GCM', iv: new Uint8Array(iv)}, key, ct);
+    return abToStr(plain);
+  } catch (e) {
+    throw new Error('Не удалось расшифровать: неверный пароль или повреждённые данные.');
+  }
+}
+
+/* ---- Формирование ссылки: помещаем пакет в хеш (#) чтобы не отправлять серверу ----
+   Структура в хеше: #enc=<base64(JSON(package))>  */
+function makeShareHash(pkg){
+  const json = JSON.stringify(pkg);
+  return 'enc=' + encodeURIComponent(abToBase64(strToAb(json)));
+}
+function parseHash(hash){
+  if (!hash) return null;
+  const q = new URLSearchParams(hash.replace(/^#/, ''));
+  if (!q.has('enc')) return null;
+  try {
+    const b64 = decodeURIComponent(q.get('enc'));
+    const jsonStr = abToStr(base64ToAb(b64));
+    return JSON.parse(jsonStr);
+  } catch(e){ return null; }
+}
+
+/* ---- UI ---- */
+const codeEl = document.getElementById('code');
+const pwdEl = document.getElementById('password');
+const genBtn = document.getElementById('genPwd');
+const pubBtn = document.getElementById('publish');
+const res = document.getElementById('result');
+const previewBox = document.getElementById('previewBox');
+const preview = document.getElementById('preview');
+
+genBtn.onclick = () => {
+  // простой удобный пароль: 12 символов base62
+  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let p='';
+  for (let i=0;i<12;i++) p+=chars[Math.floor(Math.random()*chars.length)];
+  pwdEl.value = p;
+};
+
+pubBtn.onclick = async () => {
+  const html = codeEl.value;
+  if (!html.trim()) return alert('Введите HTML код.');
+  let password = pwdEl.value;
+  if (!password) {
+    // если пустой — сгенерируем и покажем
+    genBtn.click();
+    password = pwdEl.value;
+    alert('Сгенерирован пароль. Передайте его отдельно получателю. (Пароль не включён в саму ссылку.)');
+  }
+
+  pubBtn.disabled = true;
+  pubBtn.textContent = 'Шифрую...';
+  try {
+    const pkg = await encryptHtml(html, password);
+    // пакет может быть большим — но обычно поместится в hash
+    const hash = makeShareHash(pkg);
+    const baseUrl = location.origin + location.pathname;
+    const shareLink = baseUrl + '#' + hash;
+    res.style.display = 'block';
+    res.innerHTML = `<strong>Ссылка (скопируй и отправь):</strong><br>
+      <input id="linkField" style="width:100%;padding:8px;margin-top:6px" value="${shareLink}" readonly />
+      <div style="margin-top:8px">
+        <button id="copyBtn">Копировать ссылку</button>
+        <button id="openBtn">Открыть в новой вкладке</button>
+        <button id="showPreview">Предпросмотр здесь</button>
+      </div>
+      <p><small>Пароль не входит в ссылку. Обязательно передайте пароль получателю другим каналом.</small></p>`;
+
+    document.getElementById('copyBtn').onclick = () => {
+      const lf = document.getElementById('linkField');
+      lf.select(); lf.setSelectionRange(0, 99999);
+      document.execCommand('copy');
+      alert('Ссылка скопирована в буфер обмена. Не забудь передать пароль отдельно.');
+    };
+    document.getElementById('openBtn').onclick = () => window.open(shareLink, '_blank');
+
+    document.getElementById('showPreview').onclick = async () => {
+      previewBox.style.display = 'block';
+      try {
+        const dec = await decryptPackage(pkg, password);
+        preview.srcdoc = dec;
+      } catch(e){
+        alert(e.message);
+      }
+    };
+
+  } catch(err){
+    alert('Ошибка: ' + err.message);
+  } finally {
+    pubBtn.disabled = false;
+    pubBtn.textContent = 'Зашифровать и создать ссылку';
+  }
+};
+
+/* ---- Просмотр / Расшифровка при открытии ссылки с хешем ---- */
+const hashPkg = parseHash(location.hash);
+if (hashPkg) {
+  // переключаем UI в режим просмотра
+  document.getElementById('app').style.display = 'none';
+  const viewer = document.getElementById('viewer');
+  viewer.style.display = 'block';
+  document.getElementById('decryptBtn').onclick = async () => {
+    const pwd = document.getElementById('decPassword').value;
+    if (!pwd) return alert('Введи пароль для расшифровки.');
+    document.getElementById('decryptBtn').disabled = true;
+    document.getElementById('decryptBtn').textContent = 'Расшифровываю...';
+    try {
+      const plain = await decryptPackage(hashPkg, pwd);
+      document.getElementById('decResult').style.display='block';
+      document.getElementById('decResult').innerHTML = '<strong>Успешно расшифровано.</strong>';
+      document.getElementById('decPreviewBox').style.display='block';
+      document.getElementById('decPreview').srcdoc = plain;
+    } catch(e){
+      alert('Ошибка: ' + e.message);
+    } finally {
+      document.getElementById('decryptBtn').disabled = false;
+      document.getElementById('decryptBtn').textContent = 'Расшифровать и открыть';
+    }
+  };
+  // Подсказка: если пароль был сгенерирован владельцем, попросите пароль отдельно
+}
+</script>
+</body>
+</html>
